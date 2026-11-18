@@ -24,4 +24,19 @@
 python -m http.server 5190
 ```
 
-브라우저에서 `http://localhost:5190` 을 열어요. 같이 하기(멀티플레이)는 claude.ai 아티팩트에서만 동작하고, 로컬에서는 혼자 연습만 할 수 있어요.
+브라우저에서 `http://localhost:5190` 을 열어요.
+
+## 같이 하기 (멀티플레이)
+
+- claude.ai 아티팩트로 열면 claude.ai 의 방 기능을 써요.
+- 그 밖(예: https://island-8pt.pages.dev)에서는 `server/` 의 방 서버(Cloudflare Worker + Durable Object)에 웹소켓으로 붙어요.
+  주소는 `index.html` 의 `ROOM_SERVER` 에 있어요 (`wss://island-room.quase01.workers.dev`).
+- 방 서버는 `server/wrangler.toml` 의 `ALLOWED_ORIGINS` 에 적힌 주소에서 연 게임만 받아요. 게임을 다른 주소에 올리면 여기에 추가해야 해요.
+
+방 서버 고치고 다시 올리기 (`server` 폴더에서, PowerShell 이면 `npx` 대신 `npx.cmd`):
+
+```bash
+npx wrangler deploy
+```
+
+로컬 시험: `npx wrangler dev --port 8787` 로 서버를 띄우고 게임을 `http://localhost:5190/?server=ws://localhost:8787` 로 열어요.

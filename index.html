@@ -1316,7 +1316,69 @@ const IT = { T: 10, gD: 2.6, sS: 2.9, sD: 1.8, card: 5.2 };
 /* ================= 네트워크 (room) =================
  * 방장 한 명이 경기 진행 · 문제 · 컴퓨터 친구를 맡고, 그 상태(g)를 presence 로 나눈다.
  * 모두는 자기 캐릭터 위치(s)와 이번 판 기록(rs)을 presence 로 나눈다. 나중에 들어온 사람도 presence 를 바로 받는다. */
-const NET = { room: null, gr: null, code: '', kind: 'solo', host: true, teacher: false, myPeer: null, hostPeer: null, hostSeen: 0, lastG: null, gAt: 0, sendT: 0, lobbyT: 0, joining: false };
+/* ---------- 같이 하기: 우리 방 서버(웹소켓)로 붙기 ----------
+ * claude.ai 밖(예: Cloudflare Pages)에서는 claude.ai 방 기능이 없으니 server/ 폴더의 방 서버에 웹소켓으로 붙는다.
+ * claude.ai 방 기능과 같은 모양(join · presence · peers · leave)으로 감싸서 아래 게임 코드는 그대로 쓴다.
+ * 주소 뒤에 ?server=ws://localhost:8787 을 붙이면 그 서버로 붙는다 (로컬 시험용). */
+const ROOM_SERVER = 'wss://island-room.quase01.workers.dev';   /* server/ 폴더를 wrangler deploy 한 방 서버 */
+function roomServerUrl() {
+  const q = /[?&]server=([^&#]+)/.exec(location.search);
+  return q ? decodeURIComponent(q[1]) : ROOM_SERVER;
+}
+const PEER_ID = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => (b % 36).toString(36)).join('');
+function wsConn(base, name) {
+  const peers = new Map(), me = { peer: PEER_ID, sameTab: true, presence: {}, updatedAt: Date.now() };
+  let ws = null, closed = false, retry = 0, fullAt = 0;
+  const sendP = (d) => { if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({ t: 'p', d: d })); } catch (e) {} } };
+  const conn = {
+    /* 보통은 바뀐 부분만 보내고, 2초마다 한 번은 전체를 보낸다
+     * (서버가 잠들었다 깨면 상태를 잊어버리므로 이름·모습까지 다시 채워 주려고) */
+    presence(d) {
+      const now = Date.now(); Object.assign(me.presence, d); me.updatedAt = now;
+      if (now - fullAt > 2000) { fullAt = now; sendP(me.presence); } else sendP(d);
+      return Promise.resolve();
+    },
+    peers() { return [me].concat(Array.from(peers.values())); },
+    leave() { closed = true; try { if (ws) ws.close(1000); } catch (e) {} return Promise.resolve(); },
+  };
+  return new Promise((resolve, reject) => {
+    let first = true;
+    const open = () => {
+      try { ws = new WebSocket(base.replace(/\/+$/, '') + '/room/' + encodeURIComponent(name) + '?peer=' + PEER_ID); }
+      catch (e) { if (first) { first = false; reject({ code: 'closed' }); } return; }
+      const to = setTimeout(() => { if (first) { first = false; try { ws.close(); } catch (e) {} reject({ code: 'timeout' }); } }, 8000);
+      ws.onmessage = (ev) => {
+        let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+        const now = Date.now();
+        if (m.t === 'hello') {
+          peers.clear();
+          for (const p of m.peers || []) if (p && p.peer && p.peer !== PEER_ID) peers.set(p.peer, { peer: p.peer, sameTab: false, presence: p.p || {}, updatedAt: now });
+          retry = 0;
+          if (Object.keys(me.presence).length) { fullAt = Date.now(); sendP(me.presence); }   /* 다시 붙었으면 내 상태를 다시 알린다 */
+          if (first) { first = false; clearTimeout(to); resolve(conn); }
+        } else if (m.t === 'p' && m.peer && m.peer !== PEER_ID) {
+          const o = peers.get(m.peer) || { peer: m.peer, sameTab: false, presence: {}, updatedAt: now };
+          Object.assign(o.presence, m.d || {}); o.updatedAt = now; peers.set(m.peer, o);
+        } else if (m.t === 'x') peers.delete(m.peer);
+      };
+      ws.onclose = (ev) => {
+        clearTimeout(to);
+        if (first) { first = false; reject({ code: ev.code === 4001 ? 'limit_reached' : 'closed' }); return; }
+        if (closed || ev.code === 4000) return;
+        setTimeout(open, Math.min(5000, 500 * Math.pow(2, retry++)));   /* 끊기면 조금씩 기다렸다 다시 */
+      };
+    };
+    open();
+  });
+}
+async function wsRoom(base) {
+  const lobby = await wsConn(base, 'lobby');
+  return { join: (name) => wsConn(base, name), presence: (d) => lobby.presence(d), peers: () => lobby.peers() };
+}
+/* 친구에게 보낼 방 링크: claude.ai 에서는 아티팩트 주소, 그 밖에서는 지금 사이트 주소 */
+const shareUrl = () => (NET.ws ? location.origin + location.pathname : ART_URL) + '#room-' + NET.code;
+
+const NET = { ws: false, room: null, gr: null, code: '', kind: 'solo', host: true, teacher: false, myPeer: null, hostPeer: null, hostSeen: 0, lastG: null, gAt: 0, sendT: 0, lobbyT: 0, joining: false };
 const myId = () => (NET.gr ? (NET.myPeer || 'me') : 'me');
 const inRoom = () => !!NET.gr;
 const inMatch = () => !!(ME && MATCH_ST[GS.st] && (GS.roster || []).includes(myId()) && !NET.teacher);
@@ -1424,7 +1486,7 @@ function netRead(dt) {
 }
 function netSend(dt) {
   if (!NET.gr) return;
-  NET.sendT -= dt; if (NET.sendT > 0) return; NET.sendT = 1 / 12;
+  NET.sendT -= dt; if (NET.sendT > 0) return; NET.sendT = NET.ws ? 1 / 8 : 1 / 12;   /* 우리 서버는 무료 사용량을 아끼려고 초당 8번 */
   const meOn = ME.sim && ME.inScene;
   const pres = { s: meOn ? stateOf(ME) : null, rs: [GS.seed || 0, ME.right, r2(ME.ft || 0), r2(ME.et || 0)] };
   if (NET.host) pres.g = packGS();
@@ -1665,7 +1727,7 @@ function renderRoomCard(first) {
   setText('#rcCode', '방 번호 ' + NET.code);
   $('#rcQR').classList.toggle('hide', !(tch && NET.teacher));
   if (first && tch && NET.teacher) {
-    const url = ART_URL + '#room-' + NET.code;
+    const url = shareUrl();
     $('#rcBig').textContent = NET.code; $('#rcUrl').textContent = url;
     $('#rcHow').textContent = '휴대폰으로 QR을 찍거나, 이 페이지를 열고 [번호로]에 ' + NET.code + '을 넣어요.';
     let src = '';
@@ -1719,7 +1781,7 @@ $('#fillBtn').onclick = () => { if (NET.host) { GS.fill = !GS.fill; renderRoomCa
 $$('[data-rdiff]').forEach((b) => b.onclick = () => { SET.diff = +b.dataset.rdiff; GS.diff = SET.diff; saveSet(); renderRoomCard(); });
 $$('[data-rsubj]').forEach((b) => b.onclick = () => { SET.subj = b.dataset.rsubj; GS.subj = SET.subj; saveSet(); renderRoomCard(); });
 $('#copyBtn').onclick = () => {
-  const url = ART_URL + '#room-' + NET.code;
+  const url = shareUrl();
   const fallback = () => { const r = document.createRange(); r.selectNodeContents($('#rcUrl')); const s = getSelection(); s.removeAllRanges(); s.addRange(r); toast('링크를 골라 두었어요 · 복사해 주세요', 2); };
   try { navigator.clipboard.writeText(url).then(() => toast('🔗 링크를 복사했어요', 1.6), fallback); } catch (e) { fallback(); }
 };
@@ -1847,14 +1909,24 @@ async function boot() {
   $('#loading').style.display = 'none';
   requestAnimationFrame((t) => { last = t; loop(t); });
   let room = null;
-  try { if (window.claude && typeof window.claude.use === 'function') room = await window.claude.use('room'); } catch (e) { room = null; }
+  const onClaude = !!(window.claude && typeof window.claude.use === 'function');
+  try { if (onClaude) room = await window.claude.use('room'); } catch (e) { room = null; }
+  /* claude.ai 가 아니면 우리 방 서버(웹소켓)로 */
+  const srv = !onClaude && roomServerUrl();
+  if (!room && srv) {
+    try { room = await Promise.race([wsRoom(srv), new Promise((r) => setTimeout(() => r(null), 9000))]); } catch (e) { room = null; }
+    NET.ws = !!room;
+  }
   NET.room = room;
   setNetAvailable(!!room);
-  $('#netNote').textContent = '같이 하기는 이 페이지를 공유받은 사람이 claude.ai에 로그인해서 열었을 때만 돼요. 공개 링크로 열면 혼자 연습만 할 수 있어요.';
+  $('#netNote').textContent = onClaude
+    ? '같이 하기는 이 페이지를 공유받은 사람이 claude.ai에 로그인해서 열었을 때만 돼요. 공개 링크로 열면 혼자 연습만 할 수 있어요.'
+    : srv ? '같이 하기 서버에 연결하지 못했어요. 인터넷을 확인하고 새로고침해 주세요. 지금은 혼자 연습만 할 수 있어요.'
+      : '이 주소에서는 같이 하기 서버가 아직 설정되지 않았어요. 지금은 혼자 연습만 할 수 있어요.';
   const hashJoin = () => {
     const m = /^#room-(\d{4,6})$/.exec(location.hash || '');
     if (!m || NET.code === m[1]) return;
-    if (room) enterRoom(m[1], 'join'); else toast('공유받은 계정으로 로그인해야 방에 들어갈 수 있어요', 3.5);
+    if (room) enterRoom(m[1], 'join'); else toast(NET.ws || !window.claude ? '같이 하기 서버에 연결되지 않아 방에 들어갈 수 없어요' : '공유받은 계정으로 로그인해야 방에 들어갈 수 있어요', 3.5);
   };
   hashJoin(); addEventListener('hashchange', hashJoin);
   if (DEBUG) window.__dash = { G: G, MODES: MODES, get CHAR() { return CHAR_TPL; },get GS() { return GS; }, get MS() { return MS; }, get NET() { return NET; }, get PL() { return PL; }, get ME() { return ME; }, KEY: KEY, enterRoom: enterRoom, startSolo: startSolo, hostStartMatch: hostStartMatch,
