@@ -223,6 +223,7 @@ input.txt{flex:1;min-width:0;font-family:inherit;font-size:19px;border:3px solid
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/BufferGeometryUtils.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script>
 (function () {
@@ -557,6 +558,7 @@ function setEnv(kind) {
     setSky('#7c2d12', '#fdba74', 60, 240); W.lava = waterPlane(-5, '#f97316', '#c2410c');
     for (let i = 0; i < 14; i++) { const a = rand(0, TAU), r = rand(35, 80); deco(coneG, mat('#44403c'), Math.cos(a) * r, rand(2, 8), Math.sin(a) * r, rand(4, 9), rand(14, 26), rand(4, 9)); }
   } else {
+    if (kind === 'school') { setSky('#6ec3f4', '#eef7ff', 140, 650); for (let i = 0; i < 10; i++) cloud(rand(-160, 160), rand(45, 70), rand(-260, -80), rand(4, 7)); return; }
     setSky('#7dd3fc', '#fff7ed', 80, 300); W.water = waterPlane(-4, '#38bdf8', '#075985');
     for (let i = 0; i < 9; i++) { const a = rand(0, TAU), r = rand(40, 90); isle(Math.cos(a) * r, -1, Math.sin(a) * r, rand(2.5, 5)); }
     for (let i = 0; i < 12; i++) cloud(rand(-120, 120), rand(22, 40), rand(-150, -30), rand(3, 6));
@@ -1287,9 +1289,62 @@ const Tiles = {
   overview() { return { t: new V3(0, 0, 0), pitch: .85, dist: 28 }; },
 };
 
-/* ================= 대기 섬 · 시상대 ================= */
+/* ---------- 대기실 배경: 학교 모델 (school_lowpoly.glb) ----------
+ * 불러오는 동안은 예전 대기 섬을 보여 주고, 다 불러오면 대기실을 학교 앞마당으로 바꾼다.
+ * 부품 452개를 재질별로 합쳐서(그리기 횟수 ↓) 반 전체 기기에서도 버티게 한다. */
+let SCHOOL = null;
+const SCHOOL_SPOT = { x: 14, z: 24 };   /* 모델 좌표에서 대기실 한가운데 = 정문 앞 빈 마당 */
+const hiddenMat = shared(new THREE.MeshBasicMaterial({ visible: false }));
+function prepSchool(src) {
+  src.updateMatrixWorld(true);
+  const groups = new Map();
+  src.traverse((o) => {
+    /* CrownSrc · TrunkSrc 같은 '원본 부품'은 나무를 찍어 내는 틀이라 화면에는 안 쓴다 */
+    if (!o.isMesh || /Src\d*(_|$)/.test(o.name) || (o.parent && /Src\d*$/.test(o.parent.name))) return;
+    const m = o.material, key = m.name || m.uuid;
+    let g = o.geometry.clone(); g.applyMatrix4(o.matrixWorld);
+    for (const a of Object.keys(g.attributes)) if (a !== 'position' && a !== 'normal') g.deleteAttribute(a);
+    if (g.index) g = g.toNonIndexed();
+    if (!g.attributes.normal) g.computeVertexNormals();
+    if (!groups.has(key)) groups.set(key, { color: m.color, list: [] });
+    groups.get(key).list.push(g);
+  });
+  const BGU = THREE.BufferGeometryUtils, T = new THREE.Group();
+  const merge = BGU ? (list) => BGU.mergeBufferGeometries(list) : null;   /* this 를 쓰는 함수라 꼭 BGU. 으로 부른다 */
+  for (const gr of groups.values()) {
+    const mtl = shared(new THREE.MeshLambertMaterial({ color: gr.color.clone().convertLinearToSRGB() }));
+    let geos = gr.list;
+    if (merge && geos.length > 1) { const mg = merge(geos); if (mg) { geos.forEach((g) => g.dispose()); geos = [mg]; } }
+    for (const g of geos) { g.userData.shared = true; T.add(new THREE.Mesh(g, mtl)); }
+  }
+  /* 대기실 자리의 땅 높이를 재서 그 높이가 y = 0 이 되도록 내린다 */
+  T.updateMatrixWorld(true);
+  const ray = new THREE.Raycaster(new V3(SCHOOL_SPOT.x, 300, SCHOOL_SPOT.z), new V3(0, -1, 0));
+  const hit = ray.intersectObjects(T.children, false)[0];
+  T.position.set(-SCHOOL_SPOT.x, -(hit ? hit.point.y : 0), -SCHOOL_SPOT.z);
+  return T;
+}
+function loadSchool() {
+  if (!THREE.GLTFLoader) return Promise.resolve(null);
+  return new Promise((res) => {
+    try {
+      new THREE.GLTFLoader().load('school_lowpoly.glb',
+        (g) => { try { SCHOOL = prepSchool(g.scene); } catch (e) { SCHOOL = null; if (DEBUG) console.warn(e); } res(SCHOOL); },
+        undefined, () => res(null));
+    } catch (e) { res(null); }
+  });
+}
+
+/* ================= 대기실 · 시상대 ================= */
 const Lobby = {
   build() {
+    if (SCHOOL) {
+      /* 학교 앞마당: 보이는 건 학교 모델, 밟는 건 보이지 않는 24×24 바닥, 둘레엔 낮은 울타리 */
+      setEnv('school'); world.add(SCHOOL);
+      addBox(0, 0, 0, 24, 1.2, 24, null, { mat: hiddenMat });
+      for (const s of [-1, 1]) { addBox(s * 11.75, .7, 0, .5, .7, 24, '#fef3c7'); addBox(0, .7, s * 11.75, 24, .7, .5, '#fef3c7'); }
+      return;
+    }
     setEnv('lobby');
     addBox(0, 0, 0, 24, 1.2, 24, '#86efac');
     deco(geoBox, mat('#a16207'), 0, -2.6, 0, 23, 3, 23);
@@ -1901,6 +1956,8 @@ function setNetAvailable(on) {
 async function boot() {
   try { await Promise.race([document.fonts.load('40px Jua'), new Promise((r) => setTimeout(r, 2500))]); } catch (e) {}
   await Promise.race([loadCharModel(), new Promise((r) => setTimeout(r, 6000))]);   /* 캐릭터 모델 (실패하면 예전 캐릭터) */
+  /* 학교 배경은 기다리지 않고 뒤에서 불러온다. 다 되면 지금 대기실이면 바로 바꿔 끼운다 */
+  loadSchool().then(() => { if (SCHOOL && L.world === 'lobby') buildLobbyWorld(); });
   ME = makePlayer('me', 'me', SET.nick, lookFrom(myLook()));
   for (let i = 0; i < 11; i++) { const P = makePlayer('d' + i, 'bot', randNick(), lookFrom([randi(0, PALETTE.length - 1), randi(0, HATS.length - 1)])); P.decor = true; P.speed = 7; DECOR.push(P); }
   initTitle(); setNetAvailable(false);
@@ -1929,7 +1986,7 @@ async function boot() {
     if (room) enterRoom(m[1], 'join'); else toast(NET.ws || !window.claude ? '같이 하기 서버에 연결되지 않아 방에 들어갈 수 없어요' : '공유받은 계정으로 로그인해야 방에 들어갈 수 있어요', 3.5);
   };
   hashJoin(); addEventListener('hashchange', hashJoin);
-  if (DEBUG) window.__dash = { G: G, MODES: MODES, get CHAR() { return CHAR_TPL; },get GS() { return GS; }, get MS() { return MS; }, get NET() { return NET; }, get PL() { return PL; }, get ME() { return ME; }, KEY: KEY, enterRoom: enterRoom, startSolo: startSolo, hostStartMatch: hostStartMatch,
+  if (DEBUG) window.__dash = { G: G, MODES: MODES, get CHAR() { return CHAR_TPL; }, get SCHOOL() { return SCHOOL; }, cam: cam,get GS() { return GS; }, get MS() { return MS; }, get NET() { return NET; }, get PL() { return PL; }, get ME() { return ME; }, KEY: KEY, enterRoom: enterRoom, startSolo: startSolo, hostStartMatch: hostStartMatch,
     step(sec, fn) { const n = Math.round(sec * 60); for (let i = 0; i < n; i++) { if (fn) fn(); update(1 / 60); } updateCamera(1); renderer.render(scene, camera); return { st: GS.st, r: GS.r, me: [ME.p.x, ME.p.y, ME.p.z].map((v) => +v.toFixed(1)), right: ME.right }; } };
 }
 boot();
