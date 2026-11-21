@@ -587,6 +587,7 @@ const CG = {
   body: shared(new THREE.SphereGeometry(.55, 22, 16)), eye: shared(new THREE.SphereGeometry(.17, 14, 10)), pupil: shared(new THREE.SphereGeometry(.085, 10, 8)),
   foot: shared(new THREE.SphereGeometry(.2, 12, 8)), hand: shared(new THREE.SphereGeometry(.13, 10, 8)), cone: shared(new THREE.ConeGeometry(.22, .5, 14)),
   stick: shared(new THREE.CylinderGeometry(.03, .03, .45, 6)), ball: shared(new THREE.SphereGeometry(.1, 10, 8)), shadow: shared(new THREE.CircleGeometry(.55, 22)),
+  ring: shared(new THREE.RingGeometry(.42, .56, 28)),
 };
 const shadowMat = shared(new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .22, depthWrite: false }));
 /* ---------- 블렌더로 만든 너구리 모델 (raccoon.json) ----------
@@ -649,6 +650,29 @@ function prepSheep(src) {
   T.userData.rig = { arms: ['RightArmGroup', 'LeftArmGroup'], legs: ['LeftLegGroup', 'RightLegGroup'], tail: null, cheerZ: 1.1, hy: head.max.y - 1.45, tint: .45 };
   return T;
 }
+/* ---------- 분홍 너구리 (pink_raccoon.glb · BLENDER/Pink Raccoon .glb 를 가볍게 줄인 것) ----------
+ * 통짜 모델(관절 없음)이라 팔다리 대신 몸 전체를 뒤뚱뒤뚱. 색은 텍스처 그대로 두고,
+ * "몸 색"은 발밑 동그라미 색으로 보여 준다. */
+function prepPink(src) {
+  const T = new THREE.Group(), cache = {};
+  src.traverse((o) => {
+    if (!o.isMesh) return;
+    const m = o.material, key = m.uuid;
+    if (!cache[key]) {
+      const map = m.map || null;
+      if (map) { map.encoding = THREE.LinearEncoding; map.needsUpdate = true; }
+      cache[key] = shared(new THREE.MeshLambertMaterial({ color: m.color.clone().convertLinearToSRGB(), map: map }));
+    }
+    o.material = cache[key]; o.geometry.userData.shared = true;
+  });
+  src.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(src), s = 1.5 / (box.max.y - box.min.y);
+  src.scale.multiplyScalar(s);
+  src.position.set(-(box.min.x + box.max.x) / 2 * s, -box.min.y * s, -(box.min.z + box.max.z) / 2 * s);
+  T.add(src); T.updateMatrixWorld(true);
+  T.userData.rig = { arms: [], legs: [], tail: null, cheerZ: 0, hy: .02, tint: 0, ring: true };
+  return T;
+}
 function loadGLTF(url) {
   return new Promise((res) => {
     try { new THREE.GLTFLoader().load(url, (g) => res(g), undefined, () => res(null)); } catch (e) { res(null); }
@@ -656,8 +680,8 @@ function loadGLTF(url) {
 }
 async function loadCharModel() {
   if (!THREE.GLTFLoader) return null;
-  /* 양 인형을 먼저, 없으면(claude.ai 링크 등) 너구리 · 둘 다 안 되면 예전 젤리콩 */
-  const tries = [['sheep.gltf', prepSheep], ['raccoon.json', prepChar]];   /* raccoon.json = raccoon.glb 를 JSON 으로 (아티팩트는 .glb 불가) */
+  /* 분홍 너구리를 먼저, 없으면 양 → (claude.ai 링크 등) 회색 너구리 · 모두 안 되면 예전 젤리콩 */
+  const tries = [['pink_raccoon.glb', prepPink], ['sheep.gltf', prepSheep], ['raccoon.json', prepChar]];   /* raccoon.json = raccoon.glb 를 JSON 으로 (아티팩트는 .glb 불가) */
   for (const [url, prep] of tries) {
     const g = await loadGLTF(url);
     if (!g) continue;
@@ -684,6 +708,12 @@ function makeChar(look) {
     const rest = (o) => (o ? [o.rotation.x, o.rotation.y, o.rotation.z] : null);   /* 처음 자세 (여기에 흔들림을 더한다) */
     const arms = R.arms.map(g), legs = R.legs.map(g), tail = g(R.tail);
     ud = { inner: inner, rig: true, arms: arms, legs: legs, tail: tail, cheerZ: R.cheerZ, armRest: arms.map(rest), legRest: legs.map(rest), tailRest: rest(tail), mats: Object.values(tintM) };
+    if (R.ring) {
+      /* 텍스처 색을 지키는 캐릭터: "몸 색"은 발밑 동그라미로 */
+      const ringM = new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: .9, depthWrite: false });
+      const ring = new THREE.Mesh(CG.ring, ringM); ring.rotation.x = -Math.PI / 2; ring.position.y = .04; root.add(ring);
+      ud.mats.push(ringM);
+    }
     hy = R.hy;
   } else {
     const bodyM = new THREE.MeshLambertMaterial({ color: c }), bellyM = new THREE.MeshLambertMaterial({ color: c.clone().lerp(new THREE.Color('#ffffff'), .6) }), darkM = new THREE.MeshLambertMaterial({ color: c.clone().multiplyScalar(.55) });
@@ -833,6 +863,12 @@ function animP(P, dt) {
     if (u.arms[0]) { u.arms[0].rotation.x = ar[0][0] + (ch ? 0 : -sw * .9); u.arms[0].rotation.z = ar[0][2] + (ch ? cz + Math.sin(W.t * 14) * .25 : .06); }
     if (u.arms[1]) { u.arms[1].rotation.x = ar[1][0] + (ch ? 0 : sw * .9); u.arms[1].rotation.z = ar[1][2] + (ch ? -cz - Math.cos(W.t * 14) * .25 : -.06); }
     if (u.tail) u.tail.rotation.y = u.tailRest[1] + Math.sin(W.t * 5 + P.ph) * (.25 + k * .2);
+    if (!u.legs.length) {
+      /* 관절 없는 통짜 모델: 걸을 땐 좌우로 뒤뚱 + 살짝 앞으로 기울기, 응원할 땐 통통 뛰며 좌우로 흔들기 */
+      u.inner.rotation.z = s * .16 * k + (ch ? Math.sin(W.t * 12) * .18 : 0);
+      u.inner.rotation.x = k * .12;
+      if (ch) u.inner.position.y += Math.abs(Math.sin(W.t * 9)) * .3;
+    }
   } else {
     u.feet[0].position.z = .05 + s * .22 * k; u.feet[1].position.z = .05 - s * .22 * k;
     u.hands[0].position.set(-.6, .72 + ch * (.55 + Math.sin(W.t * 14) * .1), -s * .16 * k);
