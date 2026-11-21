@@ -558,6 +558,18 @@ function setEnv(kind) {
     setSky('#7c2d12', '#fdba74', 60, 240); W.lava = waterPlane(-5, '#f97316', '#c2410c');
     for (let i = 0; i < 14; i++) { const a = rand(0, TAU), r = rand(35, 80); deco(coneG, mat('#44403c'), Math.cos(a) * r, rand(2, 8), Math.sin(a) * r, rand(4, 9), rand(14, 26), rand(4, 9)); }
   } else {
+    if (kind === 'snow') {
+      setSky('#93c5fd', '#f8fafc', 100, 460);
+      for (let i = 0; i < 16; i++) { const s = (i % 2 ? 1 : -1), x = s * rand(60, 160), z = rand(-560, 40), h = rand(40, 90); deco(coneG, mat(i % 3 ? '#e2e8f0' : '#cbd5e1'), x, slopeY(z) + h / 2 - 10, z, h * .7, h, h * .7); }
+      for (let i = 0; i < 10; i++) cloud(rand(-160, 160), rand(30, 60), rand(-500, 0), rand(4, 7));
+      return;
+    }
+    if (kind === 'kart') {
+      setSky('#60a5fa', '#ecfccb', 120, 460);
+      const gp = new THREE.Mesh(new THREE.PlaneGeometry(700, 700), mat('#7cc35a')); gp.rotation.x = -Math.PI / 2; gp.position.y = -.02; world.add(gp);
+      for (let i = 0; i < 12; i++) cloud(rand(-200, 200), rand(35, 60), rand(-200, 200), rand(4, 7));
+      return;
+    }
     if (kind === 'school') { setSky('#6ec3f4', '#eef7ff', 140, 650); for (let i = 0; i < 10; i++) cloud(rand(-160, 160), rand(45, 70), rand(-260, -80), rand(4, 7)); return; }
     setSky('#7dd3fc', '#fff7ed', 80, 300); W.water = waterPlane(-4, '#38bdf8', '#075985');
     for (let i = 0; i < 9; i++) { const a = rand(0, TAU), r = rand(40, 90); isle(Math.cos(a) * r, -1, Math.sin(a) * r, rand(2.5, 5)); }
@@ -773,6 +785,7 @@ function setPL(list) {
 function resetForRound(P) {
   P.out = false; P.done = false; P.ft = 0; P.et = 0; P.right = 0; P.judged = -1; P.stun = 0; P.cheer = 0; P.v.set(0, 0, 0); P.tgt = null;
   P.gpass = {}; P.gwrong = {}; P.know = {}; P.bpass = {}; P.bfail = {}; P.ai = { ch: {}, lane: rand(-4, 4) };
+  P.seat = false; P.drv = null; P.boost = 0; P.prog = 0; P.lap = 0;   /* 탈것(썰매·카트) 게임용 */
   setVisible(P, true);
 }
 
@@ -844,7 +857,8 @@ function separate() {
   }
 }
 function animP(P, dt) {
-  const u = P.mesh.userData, sp = Math.hypot(P.v.x, P.v.z), k = P.onG ? Math.min(1, sp / 6) : 0;
+  /* 탈것에 앉아 있으면(P.seat) 달리기 동작은 끈다 */
+  const u = P.mesh.userData, sp = Math.hypot(P.v.x, P.v.z), k = P.onG && !P.seat ? Math.min(1, sp / 6) : 0;
   if (P.onG && sp > .8) P.ph += dt * sp * 1.9;
   if (!P.wasG && P.onG) P.sq = -.22;
   P.wasG = P.onG;
@@ -920,6 +934,13 @@ const endPtr = (e) => { if (e.pointerId === joy.id) { joy.id = null; joy.x = joy
 cvs.addEventListener('pointerup', endPtr); cvs.addEventListener('pointercancel', endPtr);
 cvs.addEventListener('wheel', (e) => { cam.dist = clamp(cam.dist + e.deltaY * .01, 5, 30); e.preventDefault(); }, { passive: false });
 $('#jumpBtn').addEventListener('pointerdown', (e) => { e.preventDefault(); audioInit(); if (ME) ME.jbuf = .14; });
+/* 탈것 조종: 좌우만 (A·D·←·→ 또는 조이스틱 가로). +1 = 오른쪽 */
+function steerInput() {
+  let s = 0;
+  if (KEY.KeyD || KEY.ArrowRight) s += 1; if (KEY.KeyA || KEY.ArrowLeft) s -= 1;
+  if (joy.id != null) s += joy.x * 1.3;
+  return clamp(s, -1, 1);
+}
 function humanInput() {
   let f = 0, s = 0;
   if (KEY.KeyW || KEY.ArrowUp) f += 1; if (KEY.KeyS || KEY.ArrowDown) f -= 1;
@@ -1441,9 +1462,323 @@ const Lobby = {
   onFall(P) { P.p.set(rand(-3, 3), .1, rand(-3, 3)); P.v.set(0, 0, 0); },
   overview() { return { t: new V3(0, 1, 0), pitch: .55, dist: 22 }; },
 };
-const MODES = [Race, OX, Tiles];
-const MODE_COL = ['#fb923c', '#60a5fa', '#c084fc'];
-/* 게임 순서는 경기마다 섞이고(GS.order), 세 번째 판이 결승(점수 2배) */
+/* ================= 탈것 게임 공통 (썰매 · 카트) =================
+ * drive(P, steer, jump, dt, live): 내가 직접 움직이는 캐릭터(sim)의 탈것 물리. steer: -1(왼쪽) ~ +1(오른쪽)
+ * pose(): 모든 캐릭터(다른 기기 친구 포함)의 탈것 모형을 캐릭터 밑에 붙이고 순위용 진행도(P.prog)를 갱신 */
+function quad(x0, x1, z0, z1, y0, y1, color) {   /* z0 → z1 로 기울어진 사각 바닥 (윗면이 하늘을 봄) */
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array([x0, y0, z0, x1, y0, z0, x0, y1, z1, x1, y1, z1]), 3));
+  g.setIndex([0, 1, 2, 2, 1, 3]); g.computeVertexNormals();
+  const m = new THREE.Mesh(g, mat(color)); world.add(m); return m;
+}
+function pine(x, y, z, s) {
+  deco(cylG, mat('#78350f'), x, y + .5 * s, z, .2 * s, 1 * s, .2 * s);
+  deco(coneG, mat('#166534'), x, y + 2 * s, z, 1.3 * s, 2.6 * s, 1.3 * s);
+  deco(coneG, mat('#f8fafc'), x, y + 3.1 * s, z, .55 * s, .8 * s, .55 * s);
+}
+function vehicle(kind, color) {
+  const g = new THREE.Group(), pm = new THREE.MeshLambertMaterial({ color: color });
+  const add = (geo, m, x, y, z, sx, sy, sz, rx, rz) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.scale.set(sx, sy, sz); if (rx) o.rotation.x = rx; if (rz) o.rotation.z = rz; g.add(o); return o; };
+  if (kind === 'sled') {
+    add(geoBox, mat('#b45309'), 0, .2, 0, 1.15, .14, 1.9);
+    add(geoBox, pm, 0, .3, -.1, .95, .1, 1.1);
+    for (const s of [-1, 1]) { add(geoBox, mat('#475569'), s * .48, .05, 0, .08, .1, 2.1); add(geoBox, mat('#475569'), s * .48, .2, 1.05, .08, .32, .1, .5); }
+    add(geoBox, mat('#92400e'), 0, .32, .95, 1.1, .16, .12);
+  } else {
+    add(geoBox, pm, 0, .36, 0, 1.5, .42, 2.3);
+    add(geoBox, pm, 0, .3, 1.25, 1.2, .3, .5);
+    add(geoBox, mat('#1f2937'), 0, .78, -.62, .95, .55, .14);
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(cylG, mat('#1f2937'), sx * .82, .32, sz * .78, .34, .3, .34, 0, Math.PI / 2);
+    add(geoBox, mat('#f8fafc'), 0, .58, 1.3, .9, .04, .3);
+  }
+  return g;
+}
+function laneOf(d, lanes) { let b = 0; for (let i = 1; i < lanes.length; i++) if (Math.abs(d - lanes[i]) < Math.abs(d - lanes[b])) b = i; return b; }
+function driveRank() { return PL.slice().sort((a, b) => (a.done !== b.done) ? (a.done ? -1 : 1) : a.done ? a.ft - b.ft : b.prog - a.prog); }
+function driveTick(dt) {   /* 방장: 모두 들어오거나 시간이 끝나면 판 끝 */
+  MS.t += dt;
+  const humans = PL.filter((P) => P.kind !== 'bot');
+  if (humans.length && humans.every((P) => P.done) && MS.T - MS.t > 6) MS.T = MS.t + 6;
+  if (PL.every((P) => P.done) || MS.t >= MS.T) MS.fin = 1;
+}
+function driveFinish(P) {
+  P.done = true; P.ft = W.t; P.cheer = 3;
+  if (P === ME) { const pl = PL.filter((Q) => Q.done).length; SFX.win(); big(pl + '등!', 1.4); burst(P.p.x, P.p.y + 1.2, P.p.z, CONF, 50, 8); }
+}
+function driveAnswer(P, ok, D) {   /* 정답 칸: 가속 / 오답 칸: 빙글 */
+  if (ok) { P.right++; P.boost = 2.2; D.sp += 5; if (P === ME) { SFX.ok(); toast('⭕ 정답! 쌩~'); burst(P.p.x, P.p.y + 1, P.p.z, CONF, 26); } }
+  else { P.stun = .8; D.sp *= .5; if (P === ME) { SFX.bad(); toast('❌ 땡! 빙글빙글'); } }
+}
+function gateBoards(cx, cy, cz, nx, nz, rotY, lanes, q, halfW) {
+  /* 문 하나: 양쪽 기둥 + 위 문제판 + 칸마다 보기판 + 바닥 색 띠. 보기판들을 돌려준다 (카트는 바퀴마다 글자를 바꿈) */
+  const LC = ['#fca5a5', '#93c5fd', '#86efac'];
+  for (const s of [-1, 1]) deco(geoBox, mat('#7c3aed'), cx + nx * s * halfW, cy + 3, cz + nz * s * halfW, .5, 6, .5);
+  const banner = plane(makeTex(q.q, { w: 1024, h: 190, bg: '#fef08a', border: '#1e293b', bw: 12 }), halfW * 2 - .4, 2.2);
+  banner.position.set(cx, cy + 5.6, cz); banner.rotation.y = rotY; world.add(banner);
+  const boards = lanes.map((d, i) => {
+    const b = plane(makeTex(q.o[i], { w: 320, h: 160, bg: '#ffffff', border: '#1e293b', bw: 10 }), 3.2, 1.6);
+    b.position.set(cx + nx * d, cy + 3.3, cz + nz * d); b.rotation.y = rotY; world.add(b);
+    const strip = new THREE.Group(); strip.position.set(cx + nx * d, cy + .04, cz + nz * d); strip.rotation.y = rotY;
+    const sm = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 2.6), mat(LC[i])); sm.rotation.x = -Math.PI / 2; strip.add(sm); world.add(strip);
+    return b;
+  });
+  return { banner: banner, boards: boards };
+}
+function retex(m, text, o) { m.material.map.dispose(); m.material.map = makeTex(text, o); m.material.needsUpdate = true; }
+
+/* ================= 게임 4: 눈썰매 레이스 ================= */
+const SL = { W: 16, SLOPE: .2, LEN: 480, SEAT: .3, LANES: [-4.6, 0, 4.6], FIN: -440 };
+const slopeY = (z) => Math.min(0, z) * SL.SLOPE;
+const Sled = {
+  key: 'sled', icon: '🛷', name: '눈썰매 레이스', kind: 'race', chase: true, cam: { yaw: 0, pitch: .3, dist: 9.5 },
+  how: ['썰매가 저절로 <b>내리막</b>을 내려가요 · <b>← →</b>(A·D)로 방향만 잡아요', '문제 깃발 아래 <b>정답 칸</b>으로 지나가면 <b>쌩~ 가속!</b> 틀리면 빙글빙글', '<b>눈사람</b>에 부딪히면 느려져요 · 스페이스로 <b>점프</b>'],
+  init(g) { return { qs: [0, 1, 2, 3, 4, 5].map(() => getMC(3, g.diff, g.rs)), t: 0, T: 100, fin: 0 }; },
+  build(g) {
+    setEnv('snow'); SR = mulberry(g.seed);
+    const qs = (g.m && g.m.qs) || [], W = SL.W;
+    this.gates = []; this.obs = []; this.veh = new Map();
+    quad(-W / 2, W / 2, 16, 0, 0, 0, '#f8fafc');
+    for (let z = 0, i = 0; z > -SL.LEN; z -= 40, i++) quad(-W / 2, W / 2, z, z - 40, slopeY(z), slopeY(z - 40), i % 2 ? '#eef2f7' : '#f8fafc');
+    for (let z = 14; z > -SL.LEN; z -= 7) for (const s of [-1, 1]) {
+      deco(geoBox, mat('#e2e8f0'), s * (W / 2 + .6), slopeY(z) + .3, z, 1.2, .9, 7.3);
+      if (SR() < .75) pine(s * (W / 2 + srand(3, 16)), slopeY(z), z + srand(-3, 3), srand(.8, 1.5));
+    }
+    const gz = [-60, -125, -190, -255, -320, -385];
+    gz.forEach((z, i) => {
+      const q = qs[i] || { q: '?', o: ['?', '?', '?'], c: 0 };
+      gateBoards(0, slopeY(z), z, 1, 0, 0, SL.LANES, q, W / 2);
+      this.gates.push({ id: 's' + i, z: z, q: q });
+    });
+    for (let i = 0; i < 30; i++) {
+      const z = srand(SL.FIN + 10, -28), x = srand(-W / 2 + 1.5, W / 2 - 1.5);
+      if (gz.some((q) => Math.abs(q - z) < 10)) continue;
+      const y = slopeY(z);
+      deco(sphereG, mat('#ffffff'), x, y + .6, z, .7, .65, .7); deco(sphereG, mat('#ffffff'), x, y + 1.45, z, .48, .46, .48);
+      const nose = deco(coneG, mat('#f97316'), x, y + 1.45, z + .5, .08, .3, .08); nose.rotation.x = Math.PI / 2;
+      this.obs.push({ x: x, z: z, r: .75 });
+    }
+    const fy = slopeY(SL.FIN);
+    const chk = canvasTex(256, 32, (x) => { for (let i = 0; i < 16; i++) for (let j = 0; j < 2; j++) { x.fillStyle = (i + j) % 2 ? '#111827' : '#ffffff'; x.fillRect(i * 16, j * 16, 16, 16); } });
+    const fl = new THREE.Mesh(new THREE.PlaneGeometry(W, 1.4), new THREE.MeshBasicMaterial({ map: chk }));
+    fl.rotation.x = -Math.PI / 2 + Math.atan(SL.SLOPE); fl.position.set(0, fy + .05, SL.FIN); world.add(fl);
+    for (const s of [-1, 1]) deco(geoBox, mat('#f43f5e'), s * (W / 2 + .5), fy + 3, SL.FIN, .8, 6, .8);
+    const ban = plane(makeTex('🏁 도착!', { w: 1024, h: 180, bg: '#f43f5e', fg: '#ffffff', border: '#ffffff', bw: 12 }), W + 1, 2.4); ban.position.set(0, fy + 6.4, SL.FIN); world.add(ban);
+    SR = Math.random;
+    for (const P of PL) { const v = vehicle('sled', P.look.color); world.add(v); this.veh.set(P, v); P.seat = true; }
+    return (i) => ({ x: -6 + (i % 5) * 3, y: SL.SEAT, z: 4 + Math.floor(i / 5) * 3.4 });
+  },
+  spawnInit(P) { P.drv = { sp: 0, vx: 0 }; P.seat = true; P.yaw = Math.PI; },
+  drive(P, steer, jump, dt, live) {
+    const D = P.drv || (P.drv = { sp: 0, vx: 0 }), p = P.p;
+    if (live && !P.done) {
+      const max = 21 * (P.speed / 8.6) * (P.boost > 0 ? 1.35 : 1);
+      if (P.stun > 0) { D.sp *= 1 - Math.min(1, 1.8 * dt); steer = 0; }
+      else D.sp += (max - D.sp) * Math.min(1, (P.boost > 0 ? 2.5 : .55) * dt);
+      D.vx += (steer * 13 - D.vx) * Math.min(1, 4 * dt);
+    } else { D.sp *= 1 - Math.min(1, 1.6 * dt); D.vx *= 1 - Math.min(1, 4 * dt); }
+    p.x += D.vx * dt; p.z -= D.sp * dt;
+    const lim = SL.W / 2 - .7; if (Math.abs(p.x) > lim) { p.x = Math.sign(p.x) * lim; D.vx *= -.3; }
+    if (p.z < -SL.LEN + 3) { p.z = -SL.LEN + 3; D.sp = 0; }
+    const gy = slopeY(p.z) + SL.SEAT;
+    P.v.y -= GRAV * dt; p.y += P.v.y * dt; P.onG = false;
+    if (p.y <= gy || (P.v.y <= 0 && p.y - gy < .3)) { p.y = gy; P.v.y = 0; P.onG = true; }   /* 내리막에 붙어 미끄러지기 */
+    if (live && jump && P.onG && P.stun <= 0) { P.v.y = 8.5; P.onG = false; P.jbuf = 0; if (P === ME) SFX.jump(); }
+    P.v.x = D.vx; P.v.z = -D.sp; P.yaw = Math.PI - D.vx * .045;
+    if (!live || P.done) return;
+    if (P.stun <= 0) for (const o of this.obs) {
+      if (Math.abs(o.z - p.z) < 1.3 && Math.hypot(o.x - p.x, o.z - p.z) < o.r + .45 && p.y - slopeY(o.z) < 1.5) {
+        P.stun = .7; D.sp *= .4; D.vx = Math.sign(p.x - o.x || 1) * 6;
+        if (P === ME) { SFX.bump(); toast('앗! 눈사람 쿵'); }
+        burst(o.x, slopeY(o.z) + 1, o.z, ['#ffffff', '#e2e8f0'], 12, 5); break;
+      }
+    }
+    for (const G of this.gates) {
+      if (P.gpass[G.id] || !(P.prevZ > G.z && p.z <= G.z)) continue;
+      P.gpass[G.id] = true; driveAnswer(P, laneOf(p.x, SL.LANES) === G.q.c, D);
+    }
+    if (p.z <= SL.FIN) driveFinish(P);
+  },
+  pose() {
+    for (const P of PL) {
+      const v = this.veh.get(P); if (!v) continue;
+      v.visible = !P.out && P.mesh.visible;
+      v.position.set(P.p.x, P.p.y - SL.SEAT, P.p.z); v.rotation.set(P.p.z < 0 ? Math.atan(SL.SLOPE) : 0, P.yaw, 0, 'YXZ');
+      P.prog = -P.p.z;
+    }
+  },
+  bot(P) {
+    const ai = P.ai, p = P.p;
+    let tx = ai.lane;
+    const G = this.gates.find((G) => !P.gpass[G.id] && G.z < p.z + .5);
+    if (G && p.z - G.z < 45) {
+      if (ai.ch[G.id] == null) ai.ch[G.id] = Math.random() < P.skill ? G.q.c : pick([0, 1, 2].filter((i) => i !== G.q.c));
+      tx = SL.LANES[ai.ch[G.id]];
+    } else if (Math.random() < .01) ai.lane = rand(-5, 5);
+    if (ai.av == null) ai.av = Math.random() < .45 + P.skill * .5;   /* 눈사람을 잘 피하는 친구인지 */
+    if (ai.av) for (const o of this.obs) { const dz = p.z - o.z; if (dz > 0 && dz < 14 && Math.abs(o.x - tx) < 1.8) { tx = o.x + (p.x >= o.x ? 2.4 : -2.4); break; } }
+    const D = P.drv || { vx: 0 };
+    return [clamp((tx - p.x) * .5 - D.vx * .08, -1, 1), 0, Math.random() < .003];
+  },
+  onFall() {},
+  tick: driveTick,
+  apply(dt) { if (!NET.host) MS.t += dt; for (const P of PL) if (P.cheer > 0 && P.sim) P.cheer -= dt; },
+  ranking: driveRank,
+  hud() {
+    const me = inMatch() ? ME : null;
+    const G = me && this.gates.find((G) => !me.gpass[G.id] && G.z < me.p.z + .5);
+    if (me && !me.done && G && me.p.z - G.z < 70) showQ('🛷 정답 칸으로 지나가요! (왼쪽 · 가운데 · 오른쪽)', G.q.q + '  →  ' + G.q.o.join(' · '));
+    else showQ();
+    setText('#hudL', '⏱ ' + fmtT(MS.T - MS.t));
+    if (me) setText('#hudM', me.done ? '🏁 도착!' : '🛷 지금 ' + (this.ranking().indexOf(me) + 1) + '등');
+    else setText('#hudM', '🏁 도착 ' + PL.filter((P) => P.done).length + '/' + PL.length);
+  },
+  overview() { let lead = null; for (const P of PL) if (!lead || P.p.z < lead.p.z) lead = P; const z = lead ? lead.p.z : 0; return { t: new V3(0, slopeY(z) + 1, z), pitch: .5, dist: 24 }; },
+};
+
+/* ================= 게임 5: 카트 레이스 ================= */
+/* 트랙 = 직선 2개 + 반원 2개 (경기장 모양). s = 트랙 중심선을 따라 잰 거리, d = 중심선에서 바깥쪽(+) 거리 */
+const KT = { Ls: 90, R: 30, W: 13, SEAT: .3, LAPS: 3, LANES: [-4, 0, 4] };
+KT.L = 2 * KT.Ls + 2 * Math.PI * KT.R; KT.S0 = KT.Ls / 2;   /* 출발선 = 아래 직선 한가운데 (x 0, z -R) */
+function ktPoint(s) {
+  const { Ls, R } = KT; s = ((s % KT.L) + KT.L) % KT.L;
+  if (s < Ls) return { x: -Ls / 2 + s, z: -R, dx: 1, dz: 0, nx: 0, nz: -1 };
+  s -= Ls;
+  if (s < Math.PI * R) { const a = -Math.PI / 2 + s / R; return { x: Ls / 2 + Math.cos(a) * R, z: Math.sin(a) * R, dx: -Math.sin(a), dz: Math.cos(a), nx: Math.cos(a), nz: Math.sin(a) }; }
+  s -= Math.PI * R;
+  if (s < Ls) return { x: Ls / 2 - s, z: R, dx: -1, dz: 0, nx: 0, nz: 1 };
+  s -= Ls; const a = Math.PI / 2 + s / R;
+  return { x: -Ls / 2 + Math.cos(a) * R, z: Math.sin(a) * R, dx: -Math.sin(a), dz: Math.cos(a), nx: Math.cos(a), nz: Math.sin(a) };
+}
+function ktProject(x, z) {
+  const { Ls, R } = KT;
+  if (x > Ls / 2) { const a = Math.atan2(z, x - Ls / 2); return { s: Ls + (a + Math.PI / 2) * R, d: Math.hypot(x - Ls / 2, z) - R }; }
+  if (x < -Ls / 2) { let a = Math.atan2(z, x + Ls / 2); if (a < 0) a += TAU; return { s: 2 * Ls + Math.PI * R + (a - Math.PI / 2) * R, d: Math.hypot(x + Ls / 2, z) - R }; }
+  if (z < 0) return { s: x + Ls / 2, d: -z - R };
+  return { s: Ls + Math.PI * R + (Ls / 2 - x), d: z - R };
+}
+const ktProg = (s) => ((s - KT.S0) % KT.L + KT.L) % KT.L;
+function stadiumPath(path, r) {
+  const { Ls } = KT;
+  path.moveTo(-Ls / 2, -r); path.lineTo(Ls / 2, -r); path.absarc(Ls / 2, 0, r, -Math.PI / 2, Math.PI / 2, false);
+  path.lineTo(-Ls / 2, r); path.absarc(-Ls / 2, 0, r, Math.PI / 2, Math.PI * 1.5, false);
+}
+function stadiumRing(rOut, rIn, color, y) {
+  const sh = new THREE.Shape(); stadiumPath(sh, rOut);
+  const hole = new THREE.Path(); stadiumPath(hole, rIn); sh.holes.push(hole);
+  const m = new THREE.Mesh(new THREE.ShapeGeometry(sh, 32), mat(color)); m.rotation.x = -Math.PI / 2; m.position.y = y; world.add(m); return m;
+}
+const Kart = {
+  key: 'kart', icon: '🏎️', name: '카트 레이스', kind: 'race', chase: true, cam: { yaw: Math.PI * 1.5, pitch: .3, dist: 9.5 },
+  how: ['카트가 저절로 달려요 · <b>← →</b>(A·D)로 운전해요', '트랙을 <b>3바퀴</b> · 바퀴마다 새 문제! <b>정답 칸</b>으로 지나가면 <b>가속</b>', '오답 칸은 빙글빙글 · 아스팔트 밖 <b>잔디</b>에선 느려져요'],
+  init(g) { return { qs: Array.from({ length: KT.LAPS * 3 }, () => getMC(3, g.diff, g.rs)), t: 0, T: 160, fin: 0 }; },
+  qOf(G, lap) { return this.qs[clamp(lap, 0, KT.LAPS - 1) * 3 + G.i] || { q: '?', o: ['?', '?', '?'], c: 0 }; },
+  build(g) {
+    setEnv('kart'); SR = mulberry(g.seed);
+    this.qs = (g.m && g.m.qs) || []; this.gates = []; this.veh = new Map(); this.shownLap = 0;
+    const { R, W, Ls } = KT;
+    stadiumRing(R + W / 2, R - W / 2, '#4b5563', .01);
+    stadiumRing(R + W / 2 + .9, R + W / 2, '#ef4444', .02); stadiumRing(R - W / 2, R - W / 2 - .9, '#f8fafc', .02);
+    const chk = canvasTex(256, 32, (x) => { for (let i = 0; i < 16; i++) for (let j = 0; j < 2; j++) { x.fillStyle = (i + j) % 2 ? '#111827' : '#ffffff'; x.fillRect(i * 16, j * 16, 16, 16); } });
+    const sl = new THREE.Mesh(new THREE.PlaneGeometry(W, 1.4), new THREE.MeshBasicMaterial({ map: chk }));
+    sl.rotation.set(-Math.PI / 2, 0, Math.PI / 2); sl.position.set(0, .03, -R); world.add(sl);
+    for (const s of [-1, 1]) deco(geoBox, mat('#f43f5e'), 0, 3, -R + s * (W / 2 + 1), .8, 6, .8);
+    const ban = plane(makeTex('🏁 출발 · 결승', { w: 1024, h: 180, bg: '#f43f5e', fg: '#ffffff', border: '#ffffff', bw: 12 }), W + 2, 2.4);
+    ban.position.set(0, 6.4, -R); ban.rotation.y = -Math.PI / 2; world.add(ban);
+    [.22, .52, .8].forEach((f, i) => {
+      const pr = f * KT.L, c = ktPoint(pr + KT.S0), rotY = Math.atan2(-c.dx, -c.dz);
+      const G = { i: i, p: pr };
+      Object.assign(G, gateBoards(c.x, 0, c.z, c.nx, c.nz, rotY, KT.LANES, this.qOf(G, 0), W / 2 + .6));
+      this.gates.push(G);
+    });
+    for (let i = 0; i < 70; i++) {   /* 트랙 밖·안 나무, 타이어 더미 */
+      const x = srand(-Ls / 2 - R - 30, Ls / 2 + R + 30), z = srand(-R - 30, R + 30), pr = ktProject(x, z);
+      if (Math.abs(pr.d) < W / 2 + 4) continue;
+      if (SR() < .2) { for (let k = 0; k < 3; k++) deco(cylG, mat(k % 2 ? '#111827' : '#374151'), x, .25 + k * .5, z, .7, .5, .7); }
+      else { const s = srand(.9, 1.6); deco(cylG, mat('#78350f'), x, s, z, .25 * s, 2 * s, .25 * s); deco(sphereG, mat(pick(['#22c55e', '#16a34a', '#4ade80'])), x, 2.6 * s, z, 1.4 * s, 1.3 * s, 1.4 * s); }
+    }
+    SR = Math.random;
+    for (const P of PL) { const v = vehicle('kart', P.look.color); world.add(v); this.veh.set(P, v); P.seat = true; }
+    return (i) => ({ x: -4 - Math.floor(i / 4) * 3.4, y: KT.SEAT, z: -R + (-4.5 + (i % 4) * 3) });
+  },
+  spawnInit(P) { P.drv = { sp: 0, prev: null }; P.seat = true; P.yaw = Math.PI / 2; P.lap = -1; },
+  track(P, pr) {   /* 바퀴 수 · 진행도 (정답 칸 판정은 내 캐릭터만) */
+    const D = P.drv || (P.drv = { sp: 0, prev: null }), prog = ktProg(pr.s);
+    if (D.prev == null) D.prev = prog;
+    const dp = prog - D.prev;
+    if (dp < -KT.L / 2) P.lap++; else if (dp > KT.L / 2) P.lap--;
+    if (P.sim && !P.done && dp > 0 && dp < KT.L / 2) for (const G of this.gates) {
+      const key = G.i + ':' + P.lap;
+      if (P.gpass[key] || P.lap < 0 || P.lap >= KT.LAPS || !(D.prev < G.p && prog >= G.p)) continue;
+      P.gpass[key] = true; driveAnswer(P, laneOf(pr.d, KT.LANES) === this.qOf(G, P.lap).c, D);
+    }
+    D.prev = prog; P.prog = P.lap * KT.L + prog;
+    if (P.sim && !P.done && P.lap >= KT.LAPS) driveFinish(P);
+  },
+  drive(P, steer, jump, dt, live) {
+    const D = P.drv || (P.drv = { sp: 0, prev: null }), p = P.p, off = Math.abs(ktProject(p.x, p.z).d) > KT.W / 2;
+    if (live && !P.done) {
+      const max = 19 * (P.speed / 8.6) * (P.boost > 0 ? 1.35 : 1) * (off ? .5 : 1);
+      if (P.stun > 0) D.sp *= 1 - Math.min(1, 2 * dt);
+      else { D.sp += (max - D.sp) * Math.min(1, (P.boost > 0 ? 2.5 : .7) * dt); P.yaw -= steer * (1.4 + Math.min(1, D.sp / 12)) * Math.min(1, D.sp / 4 + .25) * dt; }
+    } else D.sp *= 1 - Math.min(1, 1.5 * dt);
+    p.x += Math.sin(P.yaw) * D.sp * dt; p.z += Math.cos(P.yaw) * D.sp * dt;
+    const pr = ktProject(p.x, p.z), lim = KT.W / 2 + 5;
+    if (Math.abs(pr.d) > lim) { const c = ktPoint(pr.s), e = Math.sign(pr.d) * lim; p.x = c.x + c.nx * e; p.z = c.z + c.nz * e; D.sp *= .6; pr.d = e; }
+    p.y = KT.SEAT; P.v.set(Math.sin(P.yaw) * D.sp, 0, Math.cos(P.yaw) * D.sp); P.onG = true;
+    if (live) this.track(P, pr);
+  },
+  pose() {
+    for (const P of PL) {
+      const v = this.veh.get(P); if (!v) continue;
+      v.visible = !P.out && P.mesh.visible; v.position.set(P.p.x, P.p.y - KT.SEAT, P.p.z); v.rotation.set(0, P.yaw, 0);
+      if (!P.sim) this.track(P, ktProject(P.p.x, P.p.z));
+    }
+    /* 문제판 글자는 내 바퀴 수(구경 중이면 선두) 기준으로 바꿔 끼운다 */
+    const who = inMatch() ? ME : driveRank()[0], lap = who ? clamp(who.lap, 0, KT.LAPS - 1) : 0;
+    if (lap !== this.shownLap) {
+      this.shownLap = lap;
+      for (const G of this.gates) {
+        const q = this.qOf(G, lap);
+        retex(G.banner, q.q, { w: 1024, h: 190, bg: '#fef08a', border: '#1e293b', bw: 12 });
+        G.boards.forEach((b, i) => retex(b, q.o[i], { w: 320, h: 160, bg: '#ffffff', border: '#1e293b', bw: 10 }));
+      }
+    }
+  },
+  bot(P) {
+    const ai = P.ai, p = P.p, pr = ktProject(p.x, p.z), prog = ktProg(pr.s);
+    if (Math.random() < .006) ai.lane = rand(-4, 4);
+    let td = ai.lane * .8;
+    for (const G of this.gates) {
+      const ahead = (G.p - prog + KT.L) % KT.L, key = G.i + ':' + P.lap;
+      if (ahead < 45 && !P.gpass[key] && P.lap >= 0 && P.lap < KT.LAPS) {
+        const q = this.qOf(G, P.lap);
+        if (ai.ch[key] == null) ai.ch[key] = Math.random() < P.skill ? q.c : pick([0, 1, 2].filter((i) => i !== q.c));
+        td = KT.LANES[ai.ch[key]]; break;
+      }
+    }
+    const c = ktPoint(pr.s + 9), want = Math.atan2(c.x + c.nx * td - p.x, c.z + c.nz * td - p.z);
+    return [clamp(-angDiff(P.yaw, want) * 2.2, -1, 1), 0, false];
+  },
+  onFall() {},
+  tick: driveTick,
+  apply(dt) { if (!NET.host) MS.t += dt; for (const P of PL) if (P.cheer > 0 && P.sim) P.cheer -= dt; },
+  ranking: driveRank,
+  hud() {
+    const me = inMatch() ? ME : null;
+    let G = null, best = 1e9;
+    if (me && !me.done && me.lap >= 0) { const prog = ktProg(ktProject(me.p.x, me.p.z).s); for (const g of this.gates) { const a = (g.p - prog + KT.L) % KT.L; if (!me.gpass[g.i + ':' + me.lap] && a < best) { best = a; G = g; } } }
+    if (G && best < 70) { const q = this.qOf(G, me.lap); showQ('🏎️ 정답 칸으로 지나가요! (왼쪽 · 가운데 · 오른쪽)', q.q + '  →  ' + q.o.join(' · ')); }
+    else showQ();
+    setText('#hudL', '⏱ ' + fmtT(MS.T - MS.t));
+    if (me) setText('#hudM', me.done ? '🏁 도착!' : '🏎️ ' + clamp(me.lap + 1, 1, KT.LAPS) + '/' + KT.LAPS + '바퀴 · ' + (this.ranking().indexOf(me) + 1) + '등');
+    else setText('#hudM', '🏁 도착 ' + PL.filter((P) => P.done).length + '/' + PL.length);
+  },
+  overview() { const lead = driveRank()[0]; return lead ? { t: new V3(lead.p.x, 1, lead.p.z), pitch: .6, dist: 26 } : { t: new V3(0, 0, 0), pitch: 1, dist: 80 }; },
+};
+
+const MODES = [Race, OX, Tiles, Sled, Kart];
+const MODE_COL = ['#fb923c', '#60a5fa', '#c084fc', '#38bdf8', '#f43f5e'];
+/* 게임 순서는 경기마다 다섯 가지 중 세 개를 섞어 뽑고(GS.order), 세 번째 판이 결승(점수 2배) */
 const curMode = () => MODES[(GS.order || [0, 1, 2])[GS.r | 0] | 0] || MODES[0];
 const isFinal = () => (GS.r | 0) === 2;
 /* 룰렛 시간표(초): 게임 룰렛 0~gD → 과목 룰렛 sS~sS+sD → card 부터 게임 설명 → T 에 카운트다운 */
@@ -1654,7 +1989,7 @@ function hostStartMatch() {
   const roster = eligibleIds();
   if (!roster.length && !GS.fill) { toast('참가할 친구가 아직 없어요', 2); return; }
   USED = new Set(); GS.mid = (GS.mid || 0) + 1; GS.tot = {}; GS.r = 0;
-  GS.order = shuffle([0, 1, 2]); GS.rsl = [];
+  GS.order = shuffle(MODES.map((m, i) => i)).slice(0, 3); GS.rsl = [];   /* 다섯 게임 중 세 개 */
   const nb = GS.fill ? Math.max(0, 12 - roster.length) : (roster.length < 2 ? 3 : 0);
   const used = new Set();
   GS.bn = []; GS.bl = [];
@@ -1718,6 +2053,7 @@ function buildRound() {
   const spawn = M.build(GS);
   PL.forEach((P, i) => { const s = spawn(i, GS.seed); P.p.set(s.x, s.y + .05, s.z); P.prevZ = P.p.z; P.yaw = Math.PI; if (M.spawnInit) M.spawnInit(P); });
   cam.fixed = null; cam.yaw = 0; cam.pitch = M.kind === 'race' ? .36 : .62; cam.dist = M.kind === 'race' ? 10 : 15;
+  if (M.cam) { cam.yaw = M.cam.yaw; cam.pitch = M.cam.pitch; cam.dist = M.cam.dist; }
   showFF(false);
 }
 function buildLobbyWorld() {
@@ -1940,10 +2276,22 @@ function update(dt) {
   const roundOn = MATCH_ST[st] && L.built === GS.seed;
   const canMove = st === 'play' || st === 'lobby' || st === 'title';
   const killY = M.kind === 'race' ? -12 : -3;
+  const driving = roundOn && !!M.drive;   /* 썰매·카트: 게임이 직접 움직임을 계산한다 */
   for (const P of PL) {
     if (!P.sim) { if (!P.out) remoteStep(P, dt); for (const s of SPECIAL) if (s.touch && !P.out) s.touch(P); continue; }
     if (P.out) continue;
     P.prevZ = P.p.z;
+    if (driving) {
+      let steer = 0, jmp = false;
+      if (st === 'play') {
+        if (P === ME) { steer = steerInput(); jmp = ME.jbuf > 0; }
+        else { const r = M.bot(P, dt); steer = r[0]; jmp = r[2]; }
+      }
+      M.drive(P, steer, jmp, dt, st === 'play');
+      P.jbuf -= dt; P.stun -= dt; P.boost -= dt;
+      for (const s of SPECIAL) if (s.touch) s.touch(P);
+      continue;
+    }
     let ix = 0, iz = 0, jmp = false;
     if (canMove) {
       if (P === ME) { const h = humanInput(); ix = h[0]; iz = h[1]; }
@@ -1960,6 +2308,7 @@ function update(dt) {
     if (P.p.y < killY) (roundOn ? M : Lobby).onFall(P);
   }
   separate();
+  if (roundOn && M.pose) M.pose(dt);   /* 탈것 모형을 캐릭터 밑에 */
   if (roundOn && (st === 'play' || st === 'result')) M.apply(dt);
   for (const P of PL) if (!P.out) animP(P, dt);
   updateFx(dt);
@@ -1977,7 +2326,11 @@ function updateCamera(dt) {
   if (cam.fixed) { t = cam.fixed.t; yaw = cam.fixed.yaw + Math.sin(W.t * .25) * .25; pitch = cam.fixed.pitch; dist = cam.fixed.dist; }
   else if (MATCH_ST[GS.st] && (!ME.inScene || ME.out)) { const o = M.overview(); t = o.t; pitch = Math.max(pitch, o.pitch); dist = Math.max(dist, o.dist); }
   else if (!ME.inScene) { const o = Lobby.overview(); t = o.t; pitch = Math.max(pitch, o.pitch); dist = Math.max(dist, o.dist); }
-  else t = new V3(ME.p.x, ME.p.y + 1.3, ME.p.z);
+  else {
+    t = new V3(ME.p.x, ME.p.y + 1.3, ME.p.z);
+    /* 탈것 게임: 카메라가 천천히 내 탈것 뒤쪽으로 돌아간다 */
+    if (M.chase && MATCH_ST[GS.st]) { cam.yaw += angDiff(cam.yaw, ME.yaw + Math.PI) * Math.min(1, 3 * dt); yaw = cam.yaw; }
+  }
   cam.tgt.lerp(t, 1 - Math.exp(-8 * dt));
   camera.position.set(cam.tgt.x + Math.sin(yaw) * Math.cos(pitch) * dist, cam.tgt.y + Math.sin(pitch) * dist, cam.tgt.z + Math.cos(yaw) * Math.cos(pitch) * dist);
   camera.lookAt(cam.tgt);
@@ -2067,7 +2420,8 @@ async function boot() {
     if (room) enterRoom(m[1], 'join'); else toast(NET.ws || !window.claude ? '같이 하기 서버에 연결되지 않아 방에 들어갈 수 없어요' : '공유받은 계정으로 로그인해야 방에 들어갈 수 있어요', 3.5);
   };
   hashJoin(); addEventListener('hashchange', hashJoin);
-  if (DEBUG) window.__dash = { G: G, MODES: MODES, get CHAR() { return CHAR_TPL; }, get SCHOOL() { return SCHOOL; }, cam: cam,get GS() { return GS; }, get MS() { return MS; }, get NET() { return NET; }, get PL() { return PL; }, get ME() { return ME; }, KEY: KEY, enterRoom: enterRoom, startSolo: startSolo, hostStartMatch: hostStartMatch,
+  if (DEBUG) window.__dash = { G: G, MODES: MODES, get CHAR() { return CHAR_TPL; }, get SCHOOL() { return SCHOOL; }, cam: cam,
+    forceRound(order) { GS.order = order; GS.r = 0; hostStartRound(); },get GS() { return GS; }, get MS() { return MS; }, get NET() { return NET; }, get PL() { return PL; }, get ME() { return ME; }, KEY: KEY, enterRoom: enterRoom, startSolo: startSolo, hostStartMatch: hostStartMatch,
     step(sec, fn) { const n = Math.round(sec * 60); for (let i = 0; i < n; i++) { if (fn) fn(); update(1 / 60); } updateCamera(1); renderer.render(scene, camera); return { st: GS.st, r: GS.r, me: [ME.p.x, ME.p.y, ME.p.z].map((v) => +v.toFixed(1)), right: ME.right }; } };
 }
 boot();
