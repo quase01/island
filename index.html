@@ -1476,7 +1476,40 @@ function pine(x, y, z, s) {
   deco(coneG, mat('#166534'), x, y + 2 * s, z, 1.3 * s, 2.6 * s, 1.3 * s);
   deco(coneG, mat('#f8fafc'), x, y + 3.1 * s, z, .55 * s, .8 * s, .55 * s);
 }
+/* ---------- 카트 모델 (kart_raccoon.glb · kart/kart_raccoon.glb 를 가볍게 줄인 것) ----------
+ * 운전석에 분홍 너구리가 앉아 있는 모델이라, 카트 게임 동안은 서 있는 캐릭터를 숨기고 이 모델을 쓴다.
+ * "몸 색"은 파란 카트 틀(Kart_Frame) 색으로. 못 불러오면 예전 네모 카트 + 캐릭터. */
+let KART_TPL = null;
+function prepKart(src) {
+  const T = new THREE.Group(), cache = {}, drop = [];
+  src.traverse((o) => {
+    if (!o.isMesh) return;
+    if (/Studio_Floor/.test(o.name)) { drop.push(o); return; }
+    const m = o.material, key = m.uuid;
+    if (!cache[key]) {
+      const map = m.map || null;
+      if (map) { map.encoding = THREE.LinearEncoding; map.needsUpdate = true; }
+      cache[key] = shared(new THREE.MeshLambertMaterial({ color: m.color.clone().convertLinearToSRGB(), map: map }));
+    }
+    if (m.name === 'Kart_Frame') o.userData.frame = 1;
+    o.material = cache[key]; o.geometry.userData.shared = true;
+  });
+  drop.forEach((o) => o.parent.remove(o));
+  src.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(src), s = 2.5 / (box.max.z - box.min.z);   /* 길이 2.5 (예전 카트와 비슷) */
+  src.scale.multiplyScalar(s);
+  src.position.set(-(box.min.x + box.max.x) / 2 * s, -box.min.y * s, -(box.min.z + box.max.z) / 2 * s);
+  T.add(src);
+  return T;
+}
 function vehicle(kind, color) {
+  if (kind === 'kart' && KART_TPL) {
+    const g = KART_TPL.clone(true), fm = new THREE.MeshLambertMaterial({ color: color });
+    g.traverse((o) => { if (o.isMesh && o.userData.frame) o.material = fm; });
+    g.userData.wheels = ['Wheel_Front_L', 'Wheel_Front_R', 'Wheel_Rear_L', 'Wheel_Rear_R'].map((n) => g.getObjectByName(n)).filter(Boolean);
+    g.userData.driver = true;
+    return g;
+  }
   const g = new THREE.Group(), pm = new THREE.MeshLambertMaterial({ color: color });
   const add = (geo, m, x, y, z, sx, sy, sz, rx, rz) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.scale.set(sx, sy, sz); if (rx) o.rotation.x = rx; if (rz) o.rotation.z = rz; g.add(o); return o; };
   if (kind === 'sled') {
@@ -1727,10 +1760,14 @@ const Kart = {
     p.y = KT.SEAT; P.v.set(Math.sin(P.yaw) * D.sp, 0, Math.cos(P.yaw) * D.sp); P.onG = true;
     if (live) this.track(P, pr);
   },
-  pose() {
+  pose(dt) {
     for (const P of PL) {
       const v = this.veh.get(P); if (!v) continue;
-      v.visible = !P.out && P.mesh.visible; v.position.set(P.p.x, P.p.y - KT.SEAT, P.p.z); v.rotation.set(0, P.yaw, 0);
+      /* 운전사가 붙은 카트 모델이면 서 있는 캐릭터는 숨기고(이름표는 그대로) 바퀴를 굴린다 */
+      if (v.userData.driver) { P.mesh.visible = false; v.visible = !P.out; }
+      else v.visible = !P.out && P.mesh.visible;
+      v.position.set(P.p.x, P.p.y - KT.SEAT, P.p.z); v.rotation.set(0, P.yaw, 0);
+      if (v.userData.wheels) { const sp = P.drv ? P.drv.sp : Math.hypot(P.v.x, P.v.z); for (const w of v.userData.wheels) w.rotation.x += sp * (dt || 0) / .35; }
       if (!P.sim) this.track(P, ktProject(P.p.x, P.p.z));
     }
     /* 문제판 글자는 내 바퀴 수(구경 중이면 선두) 기준으로 바꿔 끼운다 */
@@ -2392,6 +2429,8 @@ async function boot() {
   await Promise.race([loadCharModel(), new Promise((r) => setTimeout(r, 6000))]);   /* 캐릭터 모델 (실패하면 예전 캐릭터) */
   /* 학교 배경은 기다리지 않고 뒤에서 불러온다. 다 되면 지금 대기실이면 바로 바꿔 끼운다 */
   loadSchool().then(() => { if (SCHOOL && L.world === 'lobby') buildLobbyWorld(); });
+  /* 카트 모델도 뒤에서 (카트 게임 전에만 준비되면 된다) */
+  loadGLTF('kart_raccoon.glb').then((g) => { if (g) { try { KART_TPL = prepKart(g.scene); } catch (e) { KART_TPL = null; if (DEBUG) console.warn(e); } } });
   ME = makePlayer('me', 'me', SET.nick, lookFrom(myLook()));
   for (let i = 0; i < 11; i++) { const P = makePlayer('d' + i, 'bot', randNick(), lookFrom([randi(0, PALETTE.length - 1), randi(0, HATS.length - 1)])); P.decor = true; P.speed = 7; DECOR.push(P); }
   initTitle(); setNetAvailable(false);
